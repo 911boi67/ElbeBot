@@ -11,7 +11,7 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise ValueError("Umgebungsvariable TOKEN ist nicht gesetzt!")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("Umgebungsvariable DATABASE_URL ist nicht gesetzt!")
 
