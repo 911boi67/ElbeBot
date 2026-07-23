@@ -1739,4 +1739,47 @@ async def voicemove(interaction: discord.Interaction, member: discord.Member, ch
         await interaction.followup.send(f"Fehler beim Verschieben: {e}", ephemeral=True)
 
 
+@bot.tree.command(name="vorlage", description="Sendet die Werbevorlage in den Werbe-Channel")
+async def vorlage(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.user.get_role(BOT_STAFF_ROLE):
+        await interaction.followup.send("Du hast keine Berechtigung dafür!", ephemeral=True)
+        return
+
+    channel = interaction.guild.get_channel(1498199142911184936)
+    if not channel:
+        await interaction.followup.send("Werbe-Channel nicht gefunden!", ephemeral=True)
+        return
+
+    text = (
+        ":flag_de: **Elbe RP | :microphone2:**\n\n"
+        "Willst du ein spannendes Roleplay erleben und Teil einer starken Community werden? "
+        "Dann komm zu :flag_de: **Elbe RP | :microphone2:**\n\n"
+        "Bei :flag_de: **Elbe RP | :microphone2:** kannst du viele verschiedene Jobs ausprobieren "
+        "und deinen eigenen Weg gehen. Egal ob du Menschen helfen willst, für Recht und Ordnung "
+        "sorgen möchtest oder spannende Einsätze erleben willst – hier ist für jeden etwas dabei!\n\n"
+        "**Unsere Jobs zum Beispiel:**\n\n"
+        ":red_car: **ADAC** – Hilf Spielern bei Pannen und Unfällen.\n"
+        ":scales: **Polizei** – Arbeite bei der Polizei und sorge für Gerechtigkeit.\n"
+        ":fire_engine: **Feuerwehr** – Lösche Brände und rette Menschen aus gefährlichen Situationen.\n"
+        ":military_helmet: **Sek** – Erlebe spektakuläre Einsätze und arbeite im Team.\n\n"
+        "Aber das ist noch lange nicht alles! Bei :flag_de: **Elbe RP | :microphone2:** erwarten "
+        "dich viele weitere Möglichkeiten, spannende Storys und ein realistisches Roleplay.\n\n"
+        ":handshake: Unser Team ist freundlich, hilfsbereit und immer für euch da.\n"
+        ":crescent_moon: Zusammen könnt ihr viele coole Abende erleben, lachen und unvergessliche Momente im RP haben.\n\n"
+        ":point_right: Also worauf wartest du noch? Join :flag_de: **Elbe RP | :microphone2:** "
+        "und werde Teil unserer Community!\n\n"
+        "https://discord.gg/wPhhBvbmaj\n\n"
+        "Wir hoffen, dass ihr uns joint! :blue_heart:"
+    )
+
+    embed = discord.Embed(
+        title=":flag_de: Elbe RP | :microphone2:",
+        description=text,
+        color=discord.Color.blue()
+    )
+    await channel.send(embed=embed)
+    await interaction.followup.send(f"✅ Vorlage wurde in {channel.mention} gesendet!", ephemeral=True)
+
+
 bot.run(TOKEN)
