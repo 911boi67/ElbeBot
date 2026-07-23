@@ -187,18 +187,21 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.db_pool = None
 
-    async def setup_hook(self):
+    async def _connect_db(self):
         use_ssl = "proxy.rlwy.net" in DATABASE_URL
+        db_pool = None
         for attempt in range(3):
             try:
-                self.db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5, ssl=use_ssl, timeout=60)
+                db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5, ssl=use_ssl, timeout=60)
                 break
             except Exception as e:
                 if attempt < 2:
                     print(f"DB connection failed (attempt {attempt+1}/3): {e}")
                     await asyncio.sleep(10)
                 else:
-                    raise
+                    print(f"DB connection failed after 3 attempts: {e}")
+                    return
+        self.db_pool = db_pool
         async with self.db_pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS warns (
@@ -249,7 +252,12 @@ class Bot(discord.Client):
                     PRIMARY KEY (guild_id, user_id)
                 )
             """)
+            rows = await conn.fetch("SELECT channel_id FROM tickets WHERE open = TRUE")
+            for row in rows:
+                self.add_view(TicketActionView(int(row["channel_id"])))
 
+    async def setup_hook(self):
+        asyncio.create_task(self._connect_db())
         self.add_view(RPView(1))
         self.add_view(RPView(2))
         self.add_view(TicketSetupView())
@@ -257,12 +265,6 @@ class Bot(discord.Client):
         self.add_view(ShiftStartView())
         self.add_view(ShiftActiveView(0))
         self.add_view(ShiftBreakView(0))
-
-        async with self.db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT channel_id FROM tickets WHERE open = TRUE")
-            for row in rows:
-                self.add_view(TicketActionView(int(row["channel_id"])))
-
         await self.tree.sync()
 
     async def close(self):
