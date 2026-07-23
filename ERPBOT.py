@@ -5,10 +5,15 @@ from datetime import timedelta
 import json
 import os
 import asyncio
+import asyncpg
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise ValueError("Umgebungsvariable TOKEN ist nicht gesetzt!")
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("Umgebungsvariable DATABASE_URL ist nicht gesetzt!")
 
 RP_SETUP_CHANNEL = 1497987421424582857
 RP_STATUS_CHANNEL = 1497669225513222164
@@ -23,28 +28,47 @@ WARN_ROLE_1 = 1529802970475270174
 WARN_ROLE_2 = 1529803196602781716
 WARN_ROLE_3 = 1529803187844943872
 
-WARNS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "warns.json")
-NOTIZEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notizen.json")
+async def get_warns(guild_id, user_id=None):
+    async with bot.db_pool.acquire() as conn:
+        if user_id:
+            rows = await conn.fetch("SELECT reason, datum, von FROM warns WHERE guild_id = $1 AND user_id = $2 ORDER BY id", guild_id, user_id)
+            return [{"grund": r["reason"], "datum": r["datum"], "von": r["von"]} for r in rows]
+        rows = await conn.fetch("SELECT DISTINCT user_id FROM warns WHERE guild_id = $1", guild_id)
+        result = {}
+        for r in rows:
+            warns = await conn.fetch("SELECT reason, datum, von FROM warns WHERE guild_id = $1 AND user_id = $2 ORDER BY id", guild_id, r["user_id"])
+            result[r["user_id"]] = [{"grund": w["reason"], "datum": w["datum"], "von": w["von"]} for w in warns]
+        return result
 
-def load_warns():
-    if not os.path.exists(WARNS_FILE):
-        return {}
-    with open(WARNS_FILE, encoding="utf-8") as f:
-        return json.load(f)
+async def add_warn(guild_id, user_id, reason, datum, von):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO warns (guild_id, user_id, reason, datum, von) VALUES ($1, $2, $3, $4, $5)", guild_id, user_id, reason, datum, von)
 
-def save_warns(data):
-    with open(WARNS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+async def remove_last_warn(guild_id, user_id):
+    async with bot.db_pool.acquire() as conn:
+        sub = await conn.fetchval("SELECT id FROM warns WHERE guild_id = $1 AND user_id = $2 ORDER BY id DESC LIMIT 1", guild_id, user_id)
+        if sub:
+            await conn.execute("DELETE FROM warns WHERE id = $1", sub)
+        return sub is not None
 
-def load_notizen():
-    if not os.path.exists(NOTIZEN_FILE):
-        return {}
-    with open(NOTIZEN_FILE, encoding="utf-8") as f:
-        return json.load(f)
+async def warn_count(guild_id, user_id):
+    async with bot.db_pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM warns WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
 
-def save_notizen(data):
-    with open(NOTIZEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+async def get_notizen(guild_id):
+    async with bot.db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, text, von, datum FROM notizen WHERE guild_id = $1 ORDER BY id", guild_id)
+        result = {}
+        for r in rows:
+            uid = r["user_id"]
+            if uid not in result:
+                result[uid] = []
+            result[uid].append({"text": r["text"], "von": r["von"], "datum": r["datum"]})
+        return result
+
+async def add_notiz(guild_id, user_id, text, von, datum):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO notizen (guild_id, user_id, text, von, datum) VALUES ($1, $2, $3, $4, $5)", guild_id, user_id, text, von, datum)
 
 async def send_mod_dm(member, action, grund, dauer=None):
     try:
@@ -161,8 +185,61 @@ class Bot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+        self.db_pool = None
 
     async def setup_hook(self):
+        self.db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        async with self.db_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS warns (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    reason TEXT DEFAULT '',
+                    datum TEXT DEFAULT '',
+                    von TEXT DEFAULT ''
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS notizen (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    text TEXT DEFAULT '',
+                    von TEXT DEFAULT '',
+                    datum TEXT DEFAULT ''
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ticket_counter (
+                    id INT PRIMARY KEY DEFAULT 1,
+                    counter INT DEFAULT 0
+                )
+            """)
+            await conn.execute("""
+                INSERT INTO ticket_counter (id, counter) VALUES (1, 0) ON CONFLICT (id) DO NOTHING
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS tickets (
+                    channel_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    number INT NOT NULL,
+                    staff_id TEXT,
+                    open BOOLEAN DEFAULT TRUE
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS shifts (
+                    guild_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    total_duty INT DEFAULT 0,
+                    total_break INT DEFAULT 0,
+                    shift_start DOUBLE PRECISION,
+                    break_start DOUBLE PRECISION,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+
         self.add_view(RPView(1))
         self.add_view(RPView(2))
         self.add_view(TicketSetupView())
@@ -170,11 +247,18 @@ class Bot(discord.Client):
         self.add_view(ShiftStartView())
         self.add_view(ShiftActiveView(0))
         self.add_view(ShiftBreakView(0))
-        data = load_tickets()
-        for channel_id, ticket in data.get("tickets", {}).items():
-            if ticket.get("open"):
-                self.add_view(TicketActionView(int(channel_id)))
+
+        async with self.db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT channel_id FROM tickets WHERE open = TRUE")
+            for row in rows:
+                self.add_view(TicketActionView(int(row["channel_id"])))
+
         await self.tree.sync()
+
+    async def close(self):
+        if self.db_pool:
+            await self.db_pool.close()
+        await super().close()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.type == discord.InteractionType.application_command and interaction.guild:
@@ -386,19 +470,12 @@ async def warn(interaction: discord.Interaction, member: discord.Member, grund: 
         await interaction.followup.send("Du kannst diesen Member nicht verwarnen – seine Rolle ist höher/gleich deiner!", ephemeral=True)
         return
 
-    warns = load_warns()
     guild_id = str(interaction.guild.id)
     user_id = str(member.id)
 
-    if guild_id not in warns:
-        warns[guild_id] = {}
+    warn_num = await warn_count(guild_id, user_id) + 1
 
-    user_warns = warns[guild_id].get(user_id, [])
-    warn_num = len(user_warns) + 1
-
-    user_warns.append({"grund": grund, "datum": str(discord.utils.utcnow()), "von": str(interaction.user)})
-    warns[guild_id][user_id] = user_warns
-    save_warns(warns)
+    await add_warn(guild_id, user_id, grund, str(discord.utils.utcnow()), str(interaction.user))
 
     role_id = WARN_ROLES_MAP.get(warn_num)
     if role_id:
@@ -450,20 +527,20 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
         await interaction.followup.send("Du hast keine Berechtigung dafür!", ephemeral=True)
         return
 
-    warns = load_warns()
     guild_id = str(interaction.guild.id)
     user_id = str(member.id)
 
-    if guild_id not in warns or user_id not in warns[guild_id] or not warns[guild_id][user_id]:
+    current = await warn_count(guild_id, user_id)
+    if current == 0:
         await interaction.followup.send("Dieser Spieler hat keine Verwarnungen.", ephemeral=True)
         return
 
-    removed = warns[guild_id][user_id].pop()
-    if not warns[guild_id][user_id]:
-        del warns[guild_id][user_id]
-    save_warns(warns)
+    removed = await remove_last_warn(guild_id, user_id)
+    if not removed:
+        await interaction.followup.send("Fehler beim Entfernen der Warn.", ephemeral=True)
+        return
 
-    remaining = len(warns.get(guild_id, {}).get(user_id, []))
+    remaining = await warn_count(guild_id, user_id)
     if remaining == 0:
         for rid in WARN_ROLES_MAP.values():
             role = interaction.guild.get_role(rid)
@@ -478,7 +555,7 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
         if new_role:
             await member.add_roles(new_role)
 
-    await send_log(interaction.guild, "Unwarn", interaction.user, member, f"Entfernter Grund: {removed['grund']}\nVerbleibende Warns: {remaining}", discord.Color.green())
+    await send_log(interaction.guild, "Unwarn", interaction.user, member, f"Verbleibende Warns: {remaining}", discord.Color.green())
     await interaction.followup.send(f"✅ Letzte Warn von {member.mention} entfernt.\nVerbleibende Warns: {remaining}", ephemeral=True)
 
 @bot.tree.command(name="warns", description="Zeigt alle verwarneten Spieler an")
@@ -488,9 +565,8 @@ async def warns_list(interaction: discord.Interaction):
         await interaction.followup.send("Du hast keine Berechtigung dafür!", ephemeral=True)
         return
 
-    warns = load_warns()
     guild_id = str(interaction.guild.id)
-    guild_warns = warns.get(guild_id, {})
+    guild_warns = await get_warns(guild_id)
 
     if not guild_warns:
         await interaction.followup.send("Es gibt keine Verwarnungen auf diesem Server.", ephemeral=True)
@@ -604,40 +680,28 @@ async def giveaway(interaction: discord.Interaction, robux: int, bis: str):
 @bot.tree.command(name="notiz", description="Fügt einem Spieler eine Notiz hinzu (nur für Admins)")
 @app_commands.describe(member="Der Spieler", text="Die Notiz")
 async def notiz(interaction: discord.Interaction, member: discord.Member, text: str):
+    await interaction.response.defer(ephemeral=True)
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("Du brauchst Administrator-Rechte!", ephemeral=True)
+        await interaction.followup.send("Du brauchst Administrator-Rechte!", ephemeral=True)
         return
 
-    notizen = load_notizen()
     guild_id = str(interaction.guild.id)
     user_id = str(member.id)
-
-    if guild_id not in notizen:
-        notizen[guild_id] = {}
-
-    if user_id not in notizen[guild_id]:
-        notizen[guild_id][user_id] = []
-
-    notizen[guild_id][user_id].append({
-        "text": text,
-        "von": str(interaction.user),
-        "datum": str(discord.utils.utcnow())
-    })
-    save_notizen(notizen)
-    await interaction.response.send_message(f"✅ Notiz für {member.mention} hinzugefügt.", ephemeral=True)
+    await add_notiz(guild_id, user_id, text, str(interaction.user), str(discord.utils.utcnow()))
+    await interaction.followup.send(f"✅ Notiz für {member.mention} hinzugefügt.", ephemeral=True)
 
 @bot.tree.command(name="notizen", description="Zeigt alle Spieler mit Notizen an")
 async def notizen_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("Du brauchst Administrator-Rechte!", ephemeral=True)
+        await interaction.followup.send("Du brauchst Administrator-Rechte!", ephemeral=True)
         return
 
-    notizen = load_notizen()
     guild_id = str(interaction.guild.id)
-    guild_notizen = notizen.get(guild_id, {})
+    guild_notizen = await get_notizen(guild_id)
 
     if not guild_notizen:
-        await interaction.response.send_message("Keine Notizen vorhanden.", ephemeral=True)
+        await interaction.followup.send("Keine Notizen vorhanden.", ephemeral=True)
         return
 
     embed = discord.Embed(title="📝 Spieler-Notizen", color=discord.Color.dark_grey())
@@ -647,7 +711,7 @@ async def notizen_list(interaction: discord.Interaction):
         last_note = notes[-1]["text"]
         embed.add_field(name=name, value=f"Letzte Notiz: {last_note}\n({len(notes)} Notiz/en)", inline=False)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="announce", description="Sendet eine Ankündigung als Embed")
 @app_commands.describe(channel="Der Channel für die Ankündigung", titel="Titel der Ankündigung", nachricht="Die Nachricht")
@@ -718,17 +782,35 @@ TICKET_SETUP_CHANNEL = 1497662554493681774
 TICKET_CATEGORY = 1529823422694166588
 TICKET_LOG_CHANNEL = 1529824134044057660
 TICKET_SUPPORT_ROLES = [1497932354524676207, 1497861979262681209]
-TICKET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tickets.json")
+async def get_ticket_counter():
+    async with bot.db_pool.acquire() as conn:
+        val = await conn.fetchval("SELECT counter FROM ticket_counter WHERE id = 1")
+        return val or 0
 
-def load_tickets():
-    if not os.path.exists(TICKET_FILE):
-        return {"counter": 0, "tickets": {}}
-    with open(TICKET_FILE, encoding="utf-8") as f:
-        return json.load(f)
+async def increment_ticket_counter():
+    async with bot.db_pool.acquire() as conn:
+        val = await conn.fetchval("UPDATE ticket_counter SET counter = counter + 1 WHERE id = 1 RETURNING counter")
+        return val
 
-def save_tickets(data):
-    with open(TICKET_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+async def create_ticket(channel_id, user_id, number):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO tickets (channel_id, user_id, number) VALUES ($1, $2, $3) ON CONFLICT (channel_id) DO NOTHING", channel_id, user_id, number)
+
+async def get_ticket(channel_id):
+    async with bot.db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM tickets WHERE channel_id = $1", channel_id)
+
+async def update_ticket_staff(channel_id, staff_id):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute("UPDATE tickets SET staff_id = $1 WHERE channel_id = $2", staff_id, channel_id)
+
+async def close_ticket(channel_id):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute("UPDATE tickets SET open = FALSE WHERE channel_id = $1", channel_id)
+
+async def delete_ticket(channel_id):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM tickets WHERE channel_id = $1", channel_id)
 
 class TicketSetupView(discord.ui.View):
     def __init__(self):
@@ -744,9 +826,8 @@ class TicketSetupView(discord.ui.View):
             await interaction.response.send_message("Ticket-Kategorie nicht gefunden!", ephemeral=True)
             return
 
-        data = load_tickets()
-        data["counter"] += 1
-        ticket_num = f"{data['counter']:03d}"
+        counter = await increment_ticket_counter()
+        ticket_num = f"{counter:03d}"
         channel_name = f"{interaction.user.name}-{ticket_num}".replace(" ", "-").lower()[:32]
 
         overwrites = {
@@ -762,17 +843,9 @@ class TicketSetupView(discord.ui.View):
             channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
         except Exception as e:
             await interaction.response.send_message(f"Fehler beim Erstellen des Ticket-Channels: {e}", ephemeral=True)
-            data["counter"] -= 1
-            save_tickets(data)
             return
 
-        data["tickets"][str(channel.id)] = {
-            "user_id": interaction.user.id,
-            "number": data["counter"],
-            "staff_id": None,
-            "open": True
-        }
-        save_tickets(data)
+        await create_ticket(str(channel.id), str(interaction.user.id), counter)
 
         embed = discord.Embed(
             title="🎫 Support-Ticket",
@@ -800,18 +873,16 @@ class CloseTicketModal(discord.ui.Modal, title="Ticket schließen"):
         self.channel_id = channel_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        data = load_tickets()
-        ticket = data["tickets"].get(str(self.channel_id))
+        ticket = await get_ticket(str(self.channel_id))
         if not ticket:
             await interaction.response.send_message("Ticket nicht gefunden!", ephemeral=True)
             return
 
-        ticket["open"] = False
-        save_tickets(data)
+        await close_ticket(str(self.channel_id))
 
         grund = self.grund.value
-        user = interaction.guild.get_member(ticket["user_id"])
-        staff = interaction.guild.get_member(ticket["staff_id"]) if ticket["staff_id"] else None
+        user = interaction.guild.get_member(int(ticket["user_id"]))
+        staff = interaction.guild.get_member(int(ticket["staff_id"])) if ticket["staff_id"] else None
 
         embed = discord.Embed(
             title="🔒 Ticket geschlossen",
@@ -848,7 +919,7 @@ class TicketActionView(discord.ui.View):
         self.channel_id = channel_id
 
     async def _can_close(self, interaction, ticket):
-        if interaction.user.id == ticket["user_id"]:
+        if interaction.user.id == int(ticket["user_id"]):
             return True
         if any(role.id in TICKET_SUPPORT_ROLES for role in interaction.user.roles):
             return True
@@ -856,8 +927,7 @@ class TicketActionView(discord.ui.View):
 
     @discord.ui.button(label="Übernehmen", style=discord.ButtonStyle.green, custom_id="ticket_claim")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_tickets()
-        ticket = data["tickets"].get(str(self.channel_id))
+        ticket = await get_ticket(str(self.channel_id))
         if not ticket:
             await interaction.response.send_message("Ticket nicht gefunden!", ephemeral=True)
             return
@@ -865,12 +935,11 @@ class TicketActionView(discord.ui.View):
         if not any(role.id in TICKET_SUPPORT_ROLES for role in interaction.user.roles):
             await interaction.response.send_message("Nur Support-Mitarbeiter können Tickets übernehmen!", ephemeral=True)
             return
-        if ticket.get("staff_id"):
+        if ticket["staff_id"]:
             await interaction.response.send_message("Dieses Ticket wird bereits bearbeitet!", ephemeral=True)
             return
 
-        ticket["staff_id"] = interaction.user.id
-        save_tickets(data)
+        await update_ticket_staff(str(self.channel_id), str(interaction.user.id))
 
         embed = discord.Embed(
             title="🎫 Support-Ticket",
@@ -882,8 +951,7 @@ class TicketActionView(discord.ui.View):
 
     @discord.ui.button(label="Schließen mit Grund", style=discord.ButtonStyle.red, custom_id="ticket_close")
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_tickets()
-        ticket = data["tickets"].get(str(self.channel_id))
+        ticket = await get_ticket(str(self.channel_id))
         if not ticket:
             await interaction.response.send_message("Ticket nicht gefunden!", ephemeral=True)
             return
@@ -899,8 +967,8 @@ class TicketClaimedView(discord.ui.View):
         self.channel_id = channel_id
 
     async def _can_close(self, interaction, ticket):
-        user_id = ticket["user_id"]
-        staff_id = ticket["staff_id"]
+        user_id = int(ticket["user_id"])
+        staff_id = int(ticket["staff_id"]) if ticket["staff_id"] else None
         if interaction.user.id == user_id:
             return True
         if staff_id and interaction.user.id == staff_id:
@@ -911,17 +979,15 @@ class TicketClaimedView(discord.ui.View):
 
     @discord.ui.button(label="Freigeben", style=discord.ButtonStyle.grey, custom_id="ticket_release")
     async def release_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_tickets()
-        ticket = data["tickets"].get(str(self.channel_id))
+        ticket = await get_ticket(str(self.channel_id))
         if not ticket:
             await interaction.response.send_message("Ticket nicht gefunden!", ephemeral=True)
             return
-        if ticket.get("staff_id") != interaction.user.id:
+        if ticket["staff_id"] != str(interaction.user.id):
             await interaction.response.send_message("Nur der zuständige Staff kann das Ticket freigeben!", ephemeral=True)
             return
 
-        ticket["staff_id"] = None
-        save_tickets(data)
+        await update_ticket_staff(str(self.channel_id), None)
 
         embed = discord.Embed(
             title="🎫 Support-Ticket",
@@ -933,8 +999,7 @@ class TicketClaimedView(discord.ui.View):
 
     @discord.ui.button(label="Schließen mit Grund", style=discord.ButtonStyle.red, custom_id="ticket_close_claimed")
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_tickets()
-        ticket = data["tickets"].get(str(self.channel_id))
+        ticket = await get_ticket(str(self.channel_id))
         if not ticket:
             await interaction.response.send_message("Ticket nicht gefunden!", ephemeral=True)
             return
@@ -1180,17 +1245,28 @@ async def rules(interaction: discord.Interaction, typ: str):
 
 SHIFT_DUTY_ROLE = 1498008061212622848
 SHIFT_BREAK_ROLE = 1498008128275480718
-SHIFT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shifts.json")
+async def get_shift(guild_id, user_id):
+    async with bot.db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM shifts WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
 
-def load_shifts():
-    if not os.path.exists(SHIFT_FILE):
-        return {}
-    with open(SHIFT_FILE, encoding="utf-8") as f:
-        return json.load(f)
+async def upsert_shift(guild_id, user_id, **kwargs):
+    async with bot.db_pool.acquire() as conn:
+        cols = ", ".join(kwargs.keys())
+        vals = list(kwargs.values())
+        placeholders = ", ".join(f"${i+3}" for i in range(len(vals)))
+        await conn.execute(f"""
+            INSERT INTO shifts (guild_id, user_id, {cols})
+            VALUES ($1, $2, {placeholders})
+            ON CONFLICT (guild_id, user_id)
+            DO UPDATE SET {', '.join(f'{k} = EXCLUDED.{k}' for k in kwargs)}
+        """, guild_id, user_id, *vals)
 
-def save_shifts(data):
-    with open(SHIFT_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+async def reset_shift(guild_id, user_id=None):
+    async with bot.db_pool.acquire() as conn:
+        if user_id:
+            await conn.execute("DELETE FROM shifts WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
+        else:
+            await conn.execute("DELETE FROM shifts WHERE guild_id = $1", guild_id)
 
 def format_duration(seconds):
     h = seconds // 3600
@@ -1204,18 +1280,19 @@ class ShiftStartView(discord.ui.View):
 
     @discord.ui.button(label="Start Shift", style=discord.ButtonStyle.green, custom_id="shift_start")
     async def start_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.get_role(SHIFT_DUTY_ROLE):
-            duty = interaction.guild.get_role(SHIFT_DUTY_ROLE)
-            if duty:
-                await interaction.user.add_roles(duty)
+        duty = interaction.guild.get_role(SHIFT_DUTY_ROLE)
+        if duty:
+            await interaction.user.add_roles(duty)
 
-        data = load_shifts()
+        gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
-        if uid not in data:
-            data[uid] = {"total_duty": 0, "total_break": 0}
-        data[uid]["shift_start"] = discord.utils.utcnow().timestamp()
-        data[uid]["break_start"] = None
-        save_shifts(data)
+        now = discord.utils.utcnow().timestamp()
+
+        existing = await get_shift(gid, uid)
+        total_duty = existing["total_duty"] if existing else 0
+        total_break = existing["total_break"] if existing else 0
+
+        await upsert_shift(gid, uid, total_duty=total_duty, total_break=total_break, shift_start=now, break_start=None)
 
         embed = discord.Embed(
             title="🟢 Shift aktiv",
@@ -1231,14 +1308,14 @@ class ShiftActiveView(discord.ui.View):
 
     @discord.ui.button(label="Break", style=discord.ButtonStyle.grey, custom_id="shift_break")
     async def break_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_shifts()
+        gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
-        if uid not in data or not data[uid].get("shift_start"):
+        shift = await get_shift(gid, uid)
+        if not shift or not shift["shift_start"]:
             await interaction.response.send_message("Kein aktiver Shift gefunden!", ephemeral=True)
             return
 
-        data[uid]["break_start"] = discord.utils.utcnow().timestamp()
-        save_shifts(data)
+        await upsert_shift(gid, uid, break_start=discord.utils.utcnow().timestamp())
 
         break_role = interaction.guild.get_role(SHIFT_BREAK_ROLE)
         if break_role:
@@ -1256,22 +1333,24 @@ class ShiftActiveView(discord.ui.View):
         await self._end_shift(interaction)
 
     async def _end_shift(self, interaction):
-        data = load_shifts()
+        gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
-        if uid not in data or not data[uid].get("shift_start"):
+        shift = await get_shift(gid, uid)
+        if not shift or not shift["shift_start"]:
             await interaction.response.send_message("Kein aktiver Shift gefunden!", ephemeral=True)
             return
 
         now = discord.utils.utcnow().timestamp()
-        shift_start = data[uid]["shift_start"]
-        elapsed = int(now - shift_start)
-        data[uid]["total_duty"] = data[uid].get("total_duty", 0) + elapsed
-        data[uid]["shift_start"] = None
-        data[uid]["break_start"] = None
-        save_shifts(data)
+        elapsed = int(now - shift["shift_start"])
+        new_total = shift["total_duty"] + elapsed
 
-        total_duty = data[uid]["total_duty"]
-        total_break = data[uid].get("total_break", 0)
+        if shift["break_start"]:
+            break_elapsed = int(now - shift["break_start"])
+            new_break = shift["total_break"] + break_elapsed
+        else:
+            new_break = shift["total_break"]
+
+        await upsert_shift(gid, uid, total_duty=new_total, total_break=new_break, shift_start=None, break_start=None)
 
         duty = interaction.guild.get_role(SHIFT_DUTY_ROLE)
         if duty and duty in interaction.user.roles:
@@ -1286,7 +1365,7 @@ class ShiftActiveView(discord.ui.View):
             color=discord.Color.red()
         )
         embed.add_field(name="⏱️ Dienstzeit", value=format_duration(elapsed), inline=True)
-        embed.add_field(name="📊 Gesamt (alle Shifts)", value=f"Dienst: {format_duration(total_duty)}\nPause: {format_duration(total_break)}", inline=False)
+        embed.add_field(name="📊 Gesamt (alle Shifts)", value=f"Dienst: {format_duration(new_total)}\nPause: {format_duration(new_break)}", inline=False)
         await interaction.response.edit_message(embed=embed, view=ShiftStartView())
 
 class ShiftBreakView(discord.ui.View):
@@ -1296,17 +1375,17 @@ class ShiftBreakView(discord.ui.View):
 
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.green, custom_id="shift_continue")
     async def continue_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_shifts()
+        gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
-        if uid not in data or not data[uid].get("break_start"):
+        shift = await get_shift(gid, uid)
+        if not shift or not shift["break_start"]:
             await interaction.response.send_message("Kein Break gefunden!", ephemeral=True)
             return
 
         now = discord.utils.utcnow().timestamp()
-        break_elapsed = int(now - data[uid]["break_start"])
-        data[uid]["total_break"] = data[uid].get("total_break", 0) + break_elapsed
-        data[uid]["break_start"] = None
-        save_shifts(data)
+        break_elapsed = int(now - shift["break_start"])
+        new_break = shift["total_break"] + break_elapsed
+        await upsert_shift(gid, uid, total_break=new_break, break_start=None)
 
         break_role = interaction.guild.get_role(SHIFT_BREAK_ROLE)
         if break_role and break_role in interaction.user.roles:
@@ -1321,26 +1400,23 @@ class ShiftBreakView(discord.ui.View):
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.red, custom_id="shift_stop_break")
     async def stop_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = load_shifts()
+        gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
-        if uid not in data or not data[uid].get("shift_start"):
+        shift = await get_shift(gid, uid)
+        if not shift or not shift["shift_start"]:
             await interaction.response.send_message("Kein aktiver Shift gefunden!", ephemeral=True)
             return
 
         now = discord.utils.utcnow().timestamp()
-        if data[uid].get("break_start"):
-            break_elapsed = int(now - data[uid]["break_start"])
-            data[uid]["total_break"] = data[uid].get("total_break", 0) + break_elapsed
-            data[uid]["break_start"] = None
+        if shift["break_start"]:
+            break_elapsed = int(now - shift["break_start"])
+            new_break = shift["total_break"] + break_elapsed
+        else:
+            new_break = shift["total_break"]
 
-        shift_start = data[uid]["shift_start"]
-        elapsed = int(now - shift_start)
-        data[uid]["total_duty"] = data[uid].get("total_duty", 0) + elapsed
-        data[uid]["shift_start"] = None
-        save_shifts(data)
-
-        total_duty = data[uid]["total_duty"]
-        total_break = data[uid].get("total_break", 0)
+        elapsed = int(now - shift["shift_start"])
+        new_total = shift["total_duty"] + elapsed
+        await upsert_shift(gid, uid, total_duty=new_total, total_break=new_break, shift_start=None, break_start=None)
 
         duty = interaction.guild.get_role(SHIFT_DUTY_ROLE)
         if duty and duty in interaction.user.roles:
@@ -1355,18 +1431,20 @@ class ShiftBreakView(discord.ui.View):
             color=discord.Color.red()
         )
         embed.add_field(name="⏱️ Dienstzeit", value=format_duration(elapsed), inline=True)
-        embed.add_field(name="📊 Gesamt (alle Shifts)", value=f"Dienst: {format_duration(total_duty)}\nPause: {format_duration(total_break)}", inline=False)
+        embed.add_field(name="📊 Gesamt (alle Shifts)", value=f"Dienst: {format_duration(new_total)}\nPause: {format_duration(new_break)}", inline=False)
         await interaction.response.edit_message(embed=embed, view=ShiftStartView())
 
 @bot.tree.command(name="shiftmanage", description="Shift-Management: Starte/Stoppe deinen Dienst")
 async def shiftmanage(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
 
-    data = load_shifts()
+    gid = str(interaction.guild.id)
     uid = str(interaction.user.id)
-    user_data = data.get(uid, {})
-    total_duty = user_data.get("total_duty", 0)
-    total_break = user_data.get("total_break", 0)
+    shift = await get_shift(gid, uid)
+    total_duty = shift["total_duty"] if shift else 0
+    total_break = shift["total_break"] if shift else 0
+    shift_start = shift["shift_start"] if shift else None
+    break_start = shift["break_start"] if shift else None
 
     embed = discord.Embed(
         title="👮 Shift-Management",
@@ -1375,8 +1453,8 @@ async def shiftmanage(interaction: discord.Interaction):
     )
     embed.add_field(name="📊 Statistik", value=f"Dienstzeit gesamt: {format_duration(total_duty)}\nPause gesamt: {format_duration(total_break)}", inline=False)
 
-    if user_data.get("shift_start"):
-        if user_data.get("break_start"):
+    if shift_start:
+        if break_start:
             await interaction.followup.send(embed=embed, view=ShiftBreakView(interaction.user.id))
         else:
             await interaction.followup.send(embed=embed, view=ShiftActiveView(interaction.user.id))
@@ -1391,14 +1469,8 @@ async def resetduty(interaction: discord.Interaction, member: discord.Member):
         await interaction.followup.send("Du hast keine Berechtigung dafür!", ephemeral=True)
         return
 
-    data = load_shifts()
-    uid = str(member.id)
-    if uid in data:
-        del data[uid]
-        save_shifts(data)
-        await interaction.followup.send(f"✅ Shift-Daten von {member.mention} wurden zurückgesetzt.", ephemeral=True)
-    else:
-        await interaction.followup.send("Dieser Member hat keine gespeicherten Shift-Daten.", ephemeral=True)
+    await reset_shift(str(interaction.guild.id), str(member.id))
+    await interaction.followup.send(f"✅ Shift-Daten von {member.mention} wurden zurückgesetzt.", ephemeral=True)
 
 @bot.tree.command(name="resetall", description="Setzt ALLE Shift-Daten aller Member zurück")
 async def resetall(interaction: discord.Interaction):
@@ -1407,7 +1479,7 @@ async def resetall(interaction: discord.Interaction):
         await interaction.followup.send("Du hast keine Berechtigung dafür!", ephemeral=True)
         return
 
-    save_shifts({})
+    await reset_shift(str(interaction.guild.id))
     await interaction.followup.send("✅ Alle Shift-Daten wurden zurückgesetzt.", ephemeral=True)
 
 if __name__ == "__main__":
