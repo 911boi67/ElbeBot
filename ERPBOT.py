@@ -99,14 +99,14 @@ class GiveawayView(discord.ui.View):
         self.robux = robux
         self.bis = bis
         self.host = host
-        self.teinehmer = []
+        self.teilnehmer = []
 
     @discord.ui.button(label="🎉 Teilnehmen", style=discord.ButtonStyle.blurple, custom_id="giveaway_join")
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id in self.teinehmer:
+        if interaction.user.id in self.teilnehmer:
             await interaction.response.send_message("Du nimmst bereits teil!", ephemeral=True)
             return
-        self.teinehmer.append(interaction.user.id)
+        self.teilnehmer.append(interaction.user.id)
         await interaction.response.send_message(f"✅ Du nimmst am Giveaway ({self.robux} Robux) teil!", ephemeral=True)
 
 intents = discord.Intents.default()
@@ -252,6 +252,17 @@ class Bot(discord.Client):
                     PRIMARY KEY (guild_id, user_id)
                 )
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS saved_messages (
+                    id SERIAL PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    titel TEXT DEFAULT '',
+                    content TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    UNIQUE(guild_id, name)
+                )
+            """)
             rows = await conn.fetch("SELECT channel_id FROM tickets WHERE open = TRUE")
             for row in rows:
                 self.add_view(TicketActionView(int(row["channel_id"])))
@@ -263,8 +274,6 @@ class Bot(discord.Client):
         self.add_view(TicketSetupView())
         self.add_view(AutoRoleView())
         self.add_view(ShiftStartView())
-        self.add_view(ShiftActiveView(0))
-        self.add_view(ShiftBreakView(0))
         await self.tree.sync()
 
     async def close(self):
@@ -283,7 +292,7 @@ class Bot(discord.Client):
 bot = Bot()
 
 @bot.tree.command(name="kick", description="Kickt einen Member vom Server")
-@app_commands.describe(member="Der Member der gekickt werden soll", reason="Grund für den Kick")
+@app_commands.describe(member="Der Member, der gekickt werden soll", reason="Grund für den Kick")
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "Kein Grund angegeben"):
     await interaction.response.defer(ephemeral=True)
 
@@ -318,7 +327,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         await interaction.followup.send(f"Fehler beim Kicken: {e}", ephemeral=True)
 
 @bot.tree.command(name="ban", description="Bannt einen Member vom Server")
-@app_commands.describe(member="Der Member der gebannt werden soll", reason="Grund für den Ban")
+@app_commands.describe(member="Der Member, der gebannt werden soll", reason="Grund für den Ban")
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "Kein Grund angegeben"):
     await interaction.response.defer(ephemeral=True)
 
@@ -353,7 +362,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
         await interaction.followup.send(f"Fehler beim Bannen: {e}", ephemeral=True)
 
 @bot.tree.command(name="timeout", description="Timeout einen Member (bis zu 28 Tage)")
-@app_commands.describe(member="Der Member der getimeoutet werden soll", dauer="Dauer z.B. 10m, 1h, 2d", reason="Grund für den Timeout")
+@app_commands.describe(member="Der Member, der getimeoutet werden soll", dauer="Dauer, z.B. 10m, 1h, 2d", reason="Grund für den Timeout")
 async def timeout(interaction: discord.Interaction, member: discord.Member, dauer: str, reason: str = "Kein Grund angegeben"):
     await interaction.response.defer(ephemeral=True)
 
@@ -445,7 +454,7 @@ async def rp_setup(interaction: discord.Interaction, server: int):
     await interaction.response.send_message(f"✅ Steuerung für {label} wurde in <#{RP_SETUP_CHANNEL}> gesendet!", ephemeral=True)
 
 @bot.tree.command(name="clear", description="Löscht Nachrichten in diesem Channel")
-@app_commands.describe(anzahl="Anzahl der Nachrichten die gelöscht werden sollen (max 100)")
+@app_commands.describe(anzahl="Anzahl der Nachrichten, die gelöscht werden sollen (max 100)")
 async def clear(interaction: discord.Interaction, anzahl: int):
     await interaction.response.defer(ephemeral=True)
 
@@ -465,7 +474,7 @@ async def clear(interaction: discord.Interaction, anzahl: int):
 WARN_ROLES_MAP = {1: WARN_ROLE_1, 2: WARN_ROLE_2, 3: WARN_ROLE_3}
 
 @bot.tree.command(name="warn", description="Verwarnt einen Member (automatische Aktion je nach Warn-Stufe)")
-@app_commands.describe(member="Der Member der verwarnt werden soll", grund="Grund für die Verwarnung")
+@app_commands.describe(member="Der Member, der verwarnt werden soll", grund="Grund für die Verwarnung")
 async def warn(interaction: discord.Interaction, member: discord.Member, grund: str = "Kein Grund angegeben"):
     await interaction.response.defer(ephemeral=True)
 
@@ -531,7 +540,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, grund: 
             pass
 
 @bot.tree.command(name="unwarn", description="Entfernt die letzte Verwarnung eines Spielers")
-@app_commands.describe(member="Der Member dessen letzte Warn entfernt werden soll")
+@app_commands.describe(member="Der Member, dessen letzte Warn entfernt werden soll")
 async def unwarn(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.defer(ephemeral=True)
 
@@ -570,7 +579,57 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
     await send_log(interaction.guild, "Unwarn", interaction.user, member, f"Verbleibende Warns: {remaining}", discord.Color.green())
     await interaction.followup.send(f"✅ Letzte Warn von {member.mention} entfernt.\nVerbleibende Warns: {remaining}", ephemeral=True)
 
-@bot.tree.command(name="warns", description="Zeigt alle verwarneten Spieler an")
+class WarnsPaginator(discord.ui.View):
+    def __init__(self, items, interaction):
+        super().__init__(timeout=120)
+        self.items = items
+        self.interaction = interaction
+        self.page = 0
+        self.per_page = 5
+        self.max_page = (len(items) - 1) // self.per_page
+
+    def _build_embed(self):
+        start = self.page * self.per_page
+        end = start + self.per_page
+        page_items = self.items[start:end]
+
+        embed = discord.Embed(title="📋 Verwarnungen", color=discord.Color.orange())
+        for user_id, user_warns in page_items:
+            member = self.interaction.guild.get_member(int(user_id))
+            name = member.mention if member else f"<@{user_id}> (nicht auf Server)"
+            warn_count = len(user_warns)
+            latest = user_warns[-1]
+            von_name = latest['von'].split('#')[0] if '#' in latest['von'] else latest['von']
+            embed.add_field(name=f"{name} – Warns: {warn_count}/3", value=f"Letzter Grund: {latest['grund']}\nDatum: {latest['datum']}\nVon: {von_name}", inline=False)
+
+        embed.set_footer(text=f"Seite {self.page + 1}/{self.max_page + 1} • {len(self.items)} Spieler")
+        return embed
+
+    async def _update(self):
+        self.prev_button.disabled = self.page == 0
+        self.next_button.disabled = self.page >= self.max_page
+        await self.interaction.edit_original_response(embed=self._build_embed(), view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.grey, custom_id="warns_prev")
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+        await self._update()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.grey, custom_id="warns_next")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page < self.max_page:
+            self.page += 1
+        await self._update()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Schließen", style=discord.ButtonStyle.red, custom_id="warns_close")
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="📍 Geschlossen.", embed=None, view=None)
+        self.stop()
+
+@bot.tree.command(name="warns", description="Zeigt alle verwarneten Spieler mit Pagination an")
 async def warns_list(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     if not interaction.user.guild_permissions.kick_members:
@@ -584,15 +643,9 @@ async def warns_list(interaction: discord.Interaction):
         await interaction.followup.send("Es gibt keine Verwarnungen auf diesem Server.", ephemeral=True)
         return
 
-    embed = discord.Embed(title="📋 Verwarnungen", color=discord.Color.orange())
-    for user_id, user_warns in guild_warns.items():
-        member = interaction.guild.get_member(int(user_id))
-        name = member.mention if member else f"<@{user_id}> (nicht auf Server)"
-        warn_count = len(user_warns)
-        latest = user_warns[-1]["grund"]
-        embed.add_field(name=f"{name} – Warns: {warn_count}/3", value=f"Letzter Grund: {latest}", inline=False)
-
-    await interaction.followup.send(embed=embed)
+    items = sorted(guild_warns.items(), key=lambda x: len(x[1]), reverse=True)
+    view = WarnsPaginator(items, interaction)
+    await interaction.followup.send(embed=view._build_embed(), view=view)
 
 @bot.tree.command(name="serverinfo", description="Zeigt Informationen über den Server an")
 async def serverinfo(interaction: discord.Interaction):
@@ -793,7 +846,7 @@ async def help_command(interaction: discord.Interaction):
 TICKET_SETUP_CHANNEL = 1497662554493681774
 TICKET_CATEGORY = 1529823422694166588
 TICKET_LOG_CHANNEL = 1529824134044057660
-TICKET_SUPPORT_ROLES = [1497932354524676207, 1497861979262681209]
+TICKET_SUPPORT_ROLES = [1497932354524676207, 1497861979262681209, 1497664906298785792]
 async def get_ticket_counter():
     async with bot.db_pool.acquire() as conn:
         val = await conn.fetchval("SELECT counter FROM ticket_counter WHERE id = 1")
@@ -1021,7 +1074,7 @@ class TicketClaimedView(discord.ui.View):
         await interaction.response.send_modal(CloseTicketModal(self.channel_id))
 
 @bot.tree.command(name="ticket", description="Ticket-System einrichten")
-@app_commands.describe(action="setup um das Ticket-System einzurichten")
+@app_commands.describe(action="setup, um das Ticket-System einzurichten")
 @app_commands.choices(action=[app_commands.Choice(name="setup", value="setup")])
 async def ticket(interaction: discord.Interaction, action: str):
     if not interaction.user.guild_permissions.administrator:
@@ -1122,7 +1175,7 @@ class AutoRoleView(discord.ui.View):
             await interaction.response.send_message(f"✅ Du hast die Rolle {role.mention} erhalten!", ephemeral=True)
 
 @bot.tree.command(name="autorole", description="Autorole-Setup: Sendet die Altersauswahl-Buttons")
-@app_commands.describe(action="setup um die Buttons zu senden")
+@app_commands.describe(action="setup, um die Buttons zu senden")
 @app_commands.choices(action=[app_commands.Choice(name="setup", value="setup")])
 async def autorole(interaction: discord.Interaction, action: str):
     await interaction.response.defer(ephemeral=True)
@@ -1320,6 +1373,9 @@ class ShiftActiveView(discord.ui.View):
 
     @discord.ui.button(label="Break", style=discord.ButtonStyle.grey, custom_id="shift_break")
     async def break_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Du kannst nur deine eigenen Shift-Buttons bedienen!", ephemeral=True)
+            return
         gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
         shift = await get_shift(gid, uid)
@@ -1345,6 +1401,9 @@ class ShiftActiveView(discord.ui.View):
         await self._end_shift(interaction)
 
     async def _end_shift(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Du kannst nur deine eigenen Shift-Buttons bedienen!", ephemeral=True)
+            return
         gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
         shift = await get_shift(gid, uid)
@@ -1387,6 +1446,9 @@ class ShiftBreakView(discord.ui.View):
 
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.green, custom_id="shift_continue")
     async def continue_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Du kannst nur deine eigenen Shift-Buttons bedienen!", ephemeral=True)
+            return
         gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
         shift = await get_shift(gid, uid)
@@ -1412,6 +1474,9 @@ class ShiftBreakView(discord.ui.View):
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.red, custom_id="shift_stop_break")
     async def stop_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Du kannst nur deine eigenen Shift-Buttons bedienen!", ephemeral=True)
+            return
         gid = str(interaction.guild.id)
         uid = str(interaction.user.id)
         shift = await get_shift(gid, uid)
@@ -1493,5 +1558,185 @@ async def resetall(interaction: discord.Interaction):
 
     await reset_shift(str(interaction.guild.id))
     await interaction.followup.send("✅ Alle Shift-Daten wurden zurückgesetzt.", ephemeral=True)
+
+# ─── Saved Messages ──────────────────────────────────────────────
+
+async def save_message(guild_id, name, titel, content, created_by):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO saved_messages (guild_id, name, titel, content, created_by)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (guild_id, name) DO UPDATE SET titel = $3, content = $4, created_by = $5
+        """, guild_id, name, titel, content, created_by)
+
+async def get_saved_message(guild_id, name):
+    async with bot.db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM saved_messages WHERE guild_id = $1 AND name = $2", guild_id, name)
+
+async def get_all_saved_messages(guild_id):
+    async with bot.db_pool.acquire() as conn:
+        return await conn.fetch("SELECT * FROM saved_messages WHERE guild_id = $1 ORDER BY id", guild_id)
+
+async def delete_saved_message(guild_id, name):
+    async with bot.db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM saved_messages WHERE guild_id = $1 AND name = $2", guild_id, name)
+
+@bot.tree.command(name="savemessage", description="Speichert eine Nachricht als Vorlage")
+@app_commands.describe(name="Name der Vorlage", titel="Titel der Nachricht", nachricht="Inhalt der Nachricht")
+async def savemessage(interaction: discord.Interaction, name: str, titel: str, nachricht: str):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("Du brauchst Administrator-Rechte!", ephemeral=True)
+        return
+
+    await save_message(str(interaction.guild.id), name.lower(), titel, nachricht, str(interaction.user))
+    await interaction.followup.send(f"✅ Nachricht **{name}** gespeichert!", ephemeral=True)
+
+@bot.tree.command(name="sendmessage", description="Sendet eine gespeicherte Nachricht in einen Channel")
+@app_commands.describe(name="Name der Vorlage", channel="Der Ziel-Channel")
+async def sendmessage(interaction: discord.Interaction, name: str, channel: discord.TextChannel):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("Du brauchst Administrator-Rechte!", ephemeral=True)
+        return
+
+    msg = await get_saved_message(str(interaction.guild.id), name.lower())
+    if not msg:
+        await interaction.followup.send(f"❌ Keine Nachricht mit dem Namen **{name}** gefunden.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title=msg["titel"], description=msg["content"], color=discord.Color.blue())
+    embed.set_footer(text=f"Gespeichert von {msg['created_by']}")
+    await channel.send(embed=embed)
+    await send_log(interaction.guild, "SendMessage", interaction.user, channel, f"Vorlage: {name}")
+    await interaction.followup.send(f"✅ **{name}** wurde in {channel.mention} gesendet!", ephemeral=True)
+
+@bot.tree.command(name="deletemessage", description="Löscht eine gespeicherte Nachricht")
+@app_commands.describe(name="Name der Vorlage")
+async def deletemessage(interaction: discord.Interaction, name: str):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("Du brauchst Administrator-Rechte!", ephemeral=True)
+        return
+
+    msg = await get_saved_message(str(interaction.guild.id), name.lower())
+    if not msg:
+        await interaction.followup.send(f"❌ Keine Nachricht mit dem Namen **{name}** gefunden.", ephemeral=True)
+        return
+
+    await delete_saved_message(str(interaction.guild.id), name.lower())
+    await interaction.followup.send(f"✅ **{name}** wurde gelöscht.", ephemeral=True)
+
+@bot.tree.command(name="savedmessages", description="Zeigt alle gespeicherten Nachrichten an")
+async def savedmessages(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.followup.send("Du brauchst Administrator-Rechte!", ephemeral=True)
+        return
+
+    msgs = await get_all_saved_messages(str(interaction.guild.id))
+    if not msgs:
+        await interaction.followup.send("Keine gespeicherten Nachrichten.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="📦 Gespeicherte Nachrichten", color=discord.Color.blue())
+    for m in msgs:
+        embed.add_field(name=m["name"], value=f"Titel: {m['titel']}\nInhalt: {m['content'][:50]}{'...' if len(m['content']) > 50 else ''}", inline=False)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="warninfo", description="Zeigt alle Verwarnungen eines Members an")
+@app_commands.describe(member="Der Member")
+async def warninfo(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.user.guild_permissions.kick_members:
+        await interaction.followup.send("Du hast keine Berechtigung dafür!", ephemeral=True)
+        return
+
+    guild_id = str(interaction.guild.id)
+    user_id = str(member.id)
+    warns = await get_warns(guild_id, user_id)
+
+    if not warns:
+        await interaction.followup.send(f"{member.mention} hat keine Verwarnungen.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title=f"⚠️ Verwarnungen – {member.display_name}", color=discord.Color.orange())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Anzahl", value=f"{len(warns)}/3", inline=False)
+
+    for i, w in enumerate(warns, 1):
+        embed.add_field(name=f"#{i} – {w['datum']}", value=f"Grund: {w['grund']}\nVon: {w['von']}", inline=False)
+
+    embed.set_footer(text=f"ID: {member.id}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="userinfo", description="Zeigt detaillierte Informationen über einen Member an")
+@app_commands.describe(member="Der Member")
+async def userinfo(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    if not interaction.user.guild_permissions.kick_members:
+        await interaction.followup.send("Du hast keine Berechtigung dafür!", ephemeral=True)
+        return
+
+    guild_id = str(interaction.guild.id)
+    user_id = str(member.id)
+
+    warns = await get_warns(guild_id, user_id)
+    notizen = await get_notizen(guild_id)
+    member_notizen = notizen.get(user_id, [])
+
+    embed = discord.Embed(title=f"👤 {member.display_name}", color=member.color or discord.Color.blurple())
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Benutzername", value=member.mention, inline=True)
+    embed.add_field(name="ID", value=member.id, inline=True)
+    embed.add_field(name="Beigetreten", value=discord.utils.format_dt(member.joined_at, style="D") if member.joined_at else "Unbekannt", inline=True)
+    embed.add_field(name="Erstellt", value=discord.utils.format_dt(member.created_at, style="D"), inline=True)
+    embed.add_field(name="Rollen", value=len(member.roles[1:]), inline=True)
+    embed.add_field(name="Warns", value=f"{len(warns)}/3", inline=True)
+    embed.add_field(name="Notizen", value=str(len(member_notizen)), inline=True)
+
+    top_roles = ", ".join(r.mention for r in member.roles[-5:][::-1] if r.name != "@everyone")
+    if top_roles:
+        embed.add_field(name="Top-Rollen", value=top_roles, inline=False)
+
+    if warns:
+        embed.add_field(name="Letzter Warn", value=f"{warns[-1]['grund']} ({warns[-1]['datum']})", inline=False)
+    if member_notizen:
+        embed.add_field(name="Letzte Notiz", value=member_notizen[-1]["text"], inline=False)
+
+    embed.set_footer(text=f"Bot-Staff: {BOT_STAFF_ROLE}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="voicemove", description="Verschiebt einen Member in einen anderen Voice-Channel")
+@app_commands.describe(member="Der Member", channel="Der Ziel-Voice-Channel")
+async def voicemove(interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.user.guild_permissions.move_members:
+        await interaction.followup.send("Du hast keine Berechtigung Member zu verschieben!", ephemeral=True)
+        return
+    if not interaction.guild.me.guild_permissions.move_members:
+        await interaction.followup.send("Ich habe keine Berechtigung Member zu verschieben!", ephemeral=True)
+        return
+    if not member.voice or not member.voice.channel:
+        await interaction.followup.send(f"{member.mention} ist in keinem Voice-Channel!", ephemeral=True)
+        return
+    if member.voice.channel.id == channel.id:
+        await interaction.followup.send(f"{member.mention} ist bereits in {channel.mention}!", ephemeral=True)
+        return
+
+    try:
+        await member.move_to(channel, reason=f"Verschoben von {interaction.user}")
+        await send_log(interaction.guild, "VoiceMove", interaction.user, member, f"Von: {member.voice.channel.mention}\nNach: {channel.mention}", discord.Color.blue())
+        await interaction.followup.send(f"✅ {member.mention} wurde nach {channel.mention} verschoben.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("Ich habe keine Berechtigung diesen Member zu verschieben!", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"Fehler beim Verschieben: {e}", ephemeral=True)
+
 
 bot.run(TOKEN)
