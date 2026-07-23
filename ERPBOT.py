@@ -1482,5 +1482,4 @@ async def resetall(interaction: discord.Interaction):
     await reset_shift(str(interaction.guild.id))
     await interaction.followup.send("✅ Alle Shift-Daten wurden zurückgesetzt.", ephemeral=True)
 
-if __name__ == "__main__":
-    bot.run(TOKEN)
+bot.run(TOKEN)
