@@ -188,7 +188,17 @@ class Bot(discord.Client):
         self.db_pool = None
 
     async def setup_hook(self):
-        self.db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+        use_ssl = "proxy.rlwy.net" in DATABASE_URL
+        for attempt in range(3):
+            try:
+                self.db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5, ssl=use_ssl, timeout=60)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    print(f"DB connection failed (attempt {attempt+1}/3): {e}")
+                    await asyncio.sleep(10)
+                else:
+                    raise
         async with self.db_pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS warns (
