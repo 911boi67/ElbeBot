@@ -803,15 +803,26 @@ async def help_command(interaction: discord.Interaction):
         "`/warn <member> [grund]` – Verwarnung (1=5min, 2=30min, 3=Kick)\n"
         "`/unwarn <member>` – Letzte Verwarnung entfernen\n"
         "`/warns` – Alle Verwarnungen anzeigen\n"
-        "`/clear <anzahl>` – Nachrichten löschen (max 100)"
+        "`/warninfo <member>` – Warns eines Members anzeigen\n"
+        "`/clear <anzahl>` – Nachrichten löschen (max 100)\n"
+        "`/voicemove <member> <channel>` – Member in Voice verschieben"
     ), inline=False)
 
     embed.add_field(name="📋 Team", value=(
         "`/teamliste` – Alle Teammitglieder anzeigen\n"
+        "`/userinfo <member>` – Detaillierte Member-Infos\n"
         "`/notiz <member> <text>` – Notiz hinzufügen\n"
         "`/notizen` – Alle Notizen anzeigen\n"
-        "`/sync` – Slash-Commands synct\n"
-        "`/announce <channel> <titel> <text>` – Ankündigung senden"
+        "`/sync` – Slash-Commands syncen\n"
+        "`/announce <channel> <titel> <text>` – Ankündigung senden\n"
+        "`/vorlage` – Werbevorlage senden"
+    ), inline=False)
+
+    embed.add_field(name="📦 Vorlagen", value=(
+        "`/savemessage <name> <titel> <text>` – Nachricht speichern\n"
+        "`/sendmessage <name> <channel>` – Gespeicherte Nachricht senden\n"
+        "`/deletemessage <name>` – Gespeicherte Nachricht löschen\n"
+        "`/savedmessages` – Alle gespeicherten Nachrichten anzeigen"
     ), inline=False)
 
     embed.add_field(name="🎮 Server", value=(
@@ -1162,17 +1173,23 @@ class AutoRoleView(discord.ui.View):
     async def age_13(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cleanup(interaction)
         role = interaction.guild.get_role(AUTOROLE_ROLE_13)
+        ping_role = interaction.guild.get_role(RP_PING_ROLE)
         if role:
             await interaction.user.add_roles(role)
-            await interaction.response.send_message(f"✅ Du hast die Rolle {role.mention} erhalten!", ephemeral=True)
+        if ping_role:
+            await interaction.user.add_roles(ping_role)
+        await interaction.response.send_message(f"✅ Du hast die Rolle {role.mention} erhalten!", ephemeral=True)
 
     @discord.ui.button(label="17-99+", style=discord.ButtonStyle.green, custom_id="autorole_17")
     async def age_17(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._cleanup(interaction)
         role = interaction.guild.get_role(AUTOROLE_ROLE_17)
+        ping_role = interaction.guild.get_role(RP_PING_ROLE)
         if role:
             await interaction.user.add_roles(role)
-            await interaction.response.send_message(f"✅ Du hast die Rolle {role.mention} erhalten!", ephemeral=True)
+        if ping_role:
+            await interaction.user.add_roles(ping_role)
+        await interaction.response.send_message(f"✅ Du hast die Rolle {role.mention} erhalten!", ephemeral=True)
 
 @bot.tree.command(name="autorole", description="Autorole-Setup: Sendet die Altersauswahl-Buttons")
 @app_commands.describe(action="setup, um die Buttons zu senden")
