@@ -15,6 +15,9 @@ DATABASE_URL = os.getenv("DATABASE_PUBLIC_URL") or os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("Umgebungsvariable DATABASE_URL ist nicht gesetzt!")
 
+WELCOME_CHANNEL = 1497659480303996947
+GOODBYE_CHANNEL = 1497660302370541598
+
 RP_SETUP_CHANNEL = 1497987421424582857
 RP_STATUS_CHANNEL = 1497669225513222164
 RP_STAFF_ROLE = 1497664906298785792
@@ -288,6 +291,32 @@ class Bot(discord.Client):
                 await interaction.response.send_message("Du hast keine Berechtigung den Bot zu nutzen!", ephemeral=True)
                 return False
         return True
+
+    async def on_member_join(self, member):
+        channel = member.guild.get_channel(WELCOME_CHANNEL)
+        if not channel:
+            return
+        embed = discord.Embed(
+            title="👋 Willkommen!",
+            description=f"Willkommen {member.mention}! Wir hoffen, du hast ein gutes RP-Erlebnis.",
+            color=discord.Color.green()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_image(url="https://media.galaxybot.app/server/1497655081150189578/fe9d684f-667f-40be-bb2e-3b2263e4ff8b.png")
+        await channel.send(embed=embed)
+
+    async def on_member_remove(self, member):
+        channel = member.guild.get_channel(GOODBYE_CHANNEL)
+        if not channel:
+            return
+        embed = discord.Embed(
+            title="👋 Auf Wiedersehen!",
+            description=f"Schade, {member.mention}, dass du gegangen bist. Wir hoffen, du hattest ein schönes RP-Erlebnis.",
+            color=discord.Color.red()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_image(url="https://media.galaxybot.app/server/1497655081150189578/7ff3ac38-5abf-4109-b770-dfe23d330e04.png")
+        await channel.send(embed=embed)
 
 bot = Bot()
 
